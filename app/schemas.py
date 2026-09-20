@@ -154,3 +154,52 @@ class Audit(BaseModel):
 class AdjudicateResponse(AnchoredReconcileResponse):
     uncertain: list[UncertainColumn] = Field(..., description="尚未裁决的 uncertain 列")
     audits: list[Audit] = Field(..., description="本次生效裁决的审计项,顺序与请求 decisions 一致")
+
+
+# ---------------------------------------------------------------- 持久化案件
+
+
+class StoredDecision(BaseModel):
+    """已入库的一项裁决:replacement 已 NFC 规范化为单个字素簇。"""
+
+    signature: list[int | None] = Field(
+        ..., description="三来源原始位置签名(空位为 null)"
+    )
+    source: int | None = Field(..., description="采用的来源下标;未按来源裁决时为 null")
+    replacement: str | None = Field(
+        ..., description="人工替换的单个 NFC 字素簇;未用替换值时为 null"
+    )
+
+
+class CaseResponse(BaseModel):
+    """一个持久化核对案件的完整状态。"""
+
+    case_id: str = Field(..., description="案件 ID(创建时生成)")
+    revision: int = Field(
+        ..., description="当前版本号:创建时为 1,每次成功追加裁决加一"
+    )
+    texts: list[str] = Field(..., description="创建时提交的三段文本")
+    anchors: list[Anchor] = Field(..., description="创建时提交的锚点列表")
+    decisions: list[StoredDecision] = Field(
+        ..., description="已生效的裁决列表,按追加顺序排列"
+    )
+    result: AdjudicateResponse = Field(
+        ..., description="当前结果:全部已生效裁决合并重算后的裁决结果"
+    )
+
+
+class CaseAdjudicationsRequest(BaseModel):
+    """向案件追加裁决:必须携带 expected_revision 做乐观并发控制。"""
+
+    expected_revision: int = Field(
+        ...,
+        ge=1,
+        description="客户端持有的当前版本号;与服务端不一致时返回 409 且不写入",
+    )
+    decisions: list[Decision] = Field(
+        default_factory=list,
+        description=(
+            "追加的裁决;与既有裁决合并后重算对齐并原子校验,"
+            "任一失效返回 409 且不写入,全部有效则落库且 revision 加一"
+        ),
+    )
