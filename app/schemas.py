@@ -154,3 +154,29 @@ class Audit(BaseModel):
 class AdjudicateResponse(AnchoredReconcileResponse):
     uncertain: list[UncertainColumn] = Field(..., description="尚未裁决的 uncertain 列")
     audits: list[Audit] = Field(..., description="本次生效裁决的审计项,顺序与请求 decisions 一致")
+
+
+class AppendAdjudicationsRequest(BaseModel):
+    """追加裁决:必须携带客户端基于的版本号,服务端在事务内校验后合并写入。"""
+
+    expected_revision: int = Field(
+        ..., ge=0, description="客户端读取案件时的 revision;与服务端当前版本不符返回 409"
+    )
+    decisions: list[Decision] = Field(
+        ...,
+        min_length=1,
+        description="本次追加的裁决(至少一条);与既有裁决合并后整体原子校验,任一失效返回 409",
+    )
+
+
+class CaseRecord(BaseModel):
+    """持久化案件的完整状态。"""
+
+    case_id: str = Field(..., description="案件 ID")
+    revision: int = Field(..., description="版本号:创建时为 0,每次成功追加裁决后加一")
+    texts: list[str] = Field(..., description="创建时提交的三段文本(原样保存)")
+    anchors: list[Anchor] = Field(..., description="创建时提交的锚点列表")
+    decisions: list[Decision] = Field(..., description="已累计生效的裁决列表,按追加顺序")
+    result: AdjudicateResponse = Field(
+        ..., description="当前结果:对全部已生效裁决重算后的对齐、共识与审计项"
+    )

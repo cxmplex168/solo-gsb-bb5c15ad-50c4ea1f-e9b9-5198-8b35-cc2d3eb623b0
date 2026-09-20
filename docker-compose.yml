@@ -4,3 +4,11 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    environment:
+      # SQLite 数据库落在数据卷内,容器重建/重启后案件仍可查询
+      CASE_DB_PATH: /data/cases.db
+    volumes:
+      - case_data:/data
+
+volumes:
+  case_data:

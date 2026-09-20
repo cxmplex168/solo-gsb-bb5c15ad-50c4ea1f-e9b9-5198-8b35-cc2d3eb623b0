@@ -14,7 +14,98 @@ docker compose up --build
 - 交互式文档(Swagger UI): <http://localhost:8000/docs>
 - 健康检查: <http://localhost:8000/health>
 
+持久化案件的 SQLite 数据库保存在名为 `case_data` 的数据卷中(容器内 `/data/cases.db`),容器重启/重建后案件仍可查询;`docker compose down -v` 会连同数据卷一起删除。
+
 ## 接口
+
+### `POST /cases`
+
+创建持久化核对案件。请求结构与 `/reconcile/anchored` 相同(`texts` 加可选 `anchors`,校验规则一致);服务端把三段文本、锚点、裁决列表(初始为空)、当前结果与递增 `revision` 存入 SQLite,返回 `201` 与完整案件状态,`revision` 初始为 `0`。
+
+```bash
+curl -X POST http://localhost:8000/cases \
+  -H "Content-Type: application/json" \
+  -d '{"texts": ["甲丙", "甲丁", "甲乙"]}'
+```
+
+```json
+{
+  "case_id": "9f0b1c2d3e4f40518a6b7c8d9e0f1a2b",
+  "revision": 0,
+  "texts": ["甲丙", "甲丁", "甲乙"],
+  "anchors": [],
+  "decisions": [],
+  "result": {
+    "consensus": "甲�",
+    "total_cost": 3,
+    "columns": ["…同 /reconcile/adjudicate 的列结构,含 anchored 标记…"],
+    "uncertain": [
+      {
+        "column": 1,
+        "sources": [
+          {"grapheme": "丙", "position": 1},
+          {"grapheme": "丁", "position": 1},
+          {"grapheme": "乙", "position": 1}
+        ]
+      }
+    ],
+    "audits": []
+  }
+}
+```
+
+### `GET /cases/{case_id}`
+
+查询案件完整状态(文本、锚点、已生效裁决列表、当前结果与 `revision`);案件落盘于 SQLite,**服务重启后仍可查询**。案件不存在返回 404。
+
+```bash
+curl http://localhost:8000/cases/9f0b1c2d3e4f40518a6b7c8d9e0f1a2b
+```
+
+### `POST /cases/{case_id}/adjudications`
+
+向案件**追加裁决**。必须提交 `expected_revision`(即客户端此前读到的 `revision`)与至少一条 `decisions`(结构同 `/reconcile/adjudicate`)。服务端在**同一事务**中完成:校验版本 → 合并既有与新增裁决 → 重算对齐并对合并后的全部裁决做原子校验 → 写入并把 `revision` 加一:
+
+- **版本不符**:返回 **409**,`detail.current_revision` 给出服务端当前版本,不写入任何修改;
+- **合并后任一裁决失效**(目标列不存在/已共识、与既有或本批裁决签名重复、`source` 指向空位):返回 **409**,`detail` 列出每项失效裁决的全部原因(下标按"既有在前、追加在后"的合并顺序),整体回滚,不写入任何修改;
+- **全部通过**:`revision` 加一,返回更新后的完整案件状态,`result` 为对全部已生效裁决重算的结果(`audits` 覆盖全部已生效裁决)。
+
+```bash
+curl -X POST http://localhost:8000/cases/9f0b1c2d3e4f40518a6b7c8d9e0f1a2b/adjudications \
+  -H "Content-Type: application/json" \
+  -d '{"expected_revision": 0, "decisions": [{"signature": [1, 1, 1], "source": 0}]}'
+```
+
+```json
+{
+  "case_id": "9f0b1c2d3e4f40518a6b7c8d9e0f1a2b",
+  "revision": 1,
+  "texts": ["甲丙", "甲丁", "甲乙"],
+  "anchors": [],
+  "decisions": [{"signature": [1, 1, 1], "source": 0, "replacement": null}],
+  "result": {
+    "consensus": "甲丙",
+    "total_cost": 3,
+    "columns": ["…"],
+    "uncertain": [],
+    "audits": [
+      {"signature": [1, 1, 1], "original": ["丙", "丁", "乙"], "adopted": "丙", "method": "source:0"}
+    ]
+  }
+}
+```
+
+版本不符时的 409 响应:
+
+```json
+{
+  "detail": {
+    "error": "revision_conflict",
+    "message": "expected_revision=0 与当前版本不符(当前 revision=1),未写入任何修改",
+    "current_revision": 1
+  }
+}
+```
 
 ### `POST /reconcile/adjudicate`
 
@@ -226,6 +317,7 @@ curl -X POST http://localhost:8000/reconcile/anchored \
 - 共识:某列至少两份相同非空字素时写入该字素,否则写入 `�`,并在 `uncertain` 中列出该列各来源的字素与原位置(0 起始,空位为 `null`)。
 - 锚点(仅 `/reconcile/anchored` 与 `/reconcile/adjudicate`):每个锚点强制三份文本指定位置的字素同列(掩码 7);锚点把序列切分为若干区间,各区间独立求全局最小成本后拼接,锚点列照常计入成本与共识。
 - 人工裁决(仅 `/reconcile/adjudicate`):以三来源原始位置签名定位 `uncertain` 列,采用某非空来源字素或单个 NFC 字素簇替换值;服务端重算对齐后一次性原子校验全部裁决,任一失效返回 409 且无部分结果,成功则返回裁决后文本、未裁决列与审计项。
+- 持久化案件(`/cases` 系列):三段文本、锚点、裁决列表、当前结果与递增 `revision` 存入 SQLite;追加裁决须携带 `expected_revision`,服务端在同一事务中校验版本、合并既有与新增裁决并重算/原子校验,版本不符或任一裁决失效均返回 409 且不写入,成功后 `revision` 加一。
 
 ## 本地开发
 
@@ -234,3 +326,5 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload        # http://localhost:8000
 python -m pytest tests/              # 运行测试(含与纯 Python 参考实现的随机对拍)
 ```
+
+案件数据库路径由环境变量 `CASE_DB_PATH` 指定,本地开发默认 `./data/cases.db`(已加入 `.gitignore`);Compose 部署时为 `/data/cases.db`,落在 `case_data` 数据卷中。
